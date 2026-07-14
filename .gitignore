@@ -1,0 +1,12 @@
+# your personal writing and derived artifacts never get committed
+samples/*
+!samples/README.md
+build/
+dist/
+STYLE.md
+draft.md
+
+# python / OS cruft
+__pycache__/
+*.pyc
+.DS_Store

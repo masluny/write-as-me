@@ -1,0 +1,8 @@
+{
+  "name": "{{SKILL_NAME}}",
+  "version": "1.0.0",
+  "description": "Draft text in {{WRITER}}'s personal writing style, scored and revised against their real stylometric fingerprint.",
+  "author": {
+    "name": "{{WRITER}}"
+  }
+}

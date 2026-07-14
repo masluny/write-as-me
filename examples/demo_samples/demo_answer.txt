@@ -1,0 +1,11 @@
+1.
+Okay so the main reason the first test failed is that the cache was never cleared between runs, so the second request got stale data and honestly the assert never had a chance. I fixed it by resetting the cache in the setup step.
+
+2.
+To be fair, the timeout error is trickier. The API is just slow on cold starts, basically the first call after a deploy takes like four seconds. I bumped the timeout to ten seconds and added one retry, which i think is the pragmatic fix here, even if it is not super elegant.
+
+3.
+Also, the flaky login test. Honestly this one drove me crazy for two days. It turns out the test user was shared between two pipelines, so when both ran at the same time one of them would randomly log the other out. I gave each pipeline its own user and at the end of the day that was the whole fix.
+
+4.
+First of all i want to say the coverage number looks fine now, we are at 84 percent. But i feel like we test the easy stuff and skip the scary stuff, so the number is kind of lying to us. My suggestion is to spend next sprint on the payment path, because that is where the real risk lives.

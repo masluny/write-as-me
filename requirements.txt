@@ -1,0 +1,4 @@
+# all optional — the scorer itself is pure stdlib Python (3.9+)
+pymupdf          # only if you ingest .pdf samples
+python-docx      # only if you ingest .docx samples
+pyspellchecker   # enables the spelling-deviation quirk feature
