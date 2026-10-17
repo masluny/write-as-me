@@ -104,6 +104,28 @@ def aggregate(docs: list[dict], sig: list[str]) -> dict[str, dict[str, float]]:
     return out
 
 
+def build_profile(docs: list[dict]) -> dict:
+    sig = derive_signature_ngrams([d["text"] for d in docs])
+    profile = {
+        "n_docs": len(docs),
+        "total_words": sum(d["n_words"] for d in docs),
+        # the spelling feature is only comparable when draft and profile were
+        # both measured with pyspellchecker; score.py checks this flag
+        "spellchecker": stylometry.spellchecker_available(),
+        "signature_ngrams": sig,
+        "features": aggregate(docs, sig),
+        "by_genre": {},
+        "docs": [{"name": d["name"], "genre": d["genre"]} for d in docs],
+    }
+    for genre in sorted({d["genre"] for d in docs}):
+        subset = [d for d in docs if d["genre"] == genre]
+        profile["by_genre"][genre] = {
+            "n_docs": len(subset),
+            "features": {k: v["mean"] for k, v in aggregate(subset, sig).items()},
+        }
+    return profile
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--corpus", type=Path, default=BUILD_DIR / "corpus.jsonl")
@@ -121,27 +143,23 @@ def main() -> None:
     if not docs:
         sys.exit("corpus is empty")
 
-    sig = derive_signature_ngrams([d["text"] for d in docs])
-    profile = {
-        "n_docs": len(docs),
-        "total_words": sum(d["n_words"] for d in docs),
-        "signature_ngrams": sig,
-        "features": aggregate(docs, sig),
-        "by_genre": {},
-        "docs": [{"name": d["name"], "genre": d["genre"]} for d in docs],
-    }
-    for genre in sorted({d["genre"] for d in docs}):
-        subset = [d for d in docs if d["genre"] == genre]
-        profile["by_genre"][genre] = {
-            "n_docs": len(subset),
-            "features": {k: v["mean"] for k, v in aggregate(subset, sig).items()},
-        }
+    profile = build_profile(docs)
+    sig = profile["signature_ngrams"]
+    if args.out.exists():  # keep a calibration written earlier by eval.py
+        try:
+            old = json.loads(args.out.read_text(encoding="utf-8"))
+            if "calibration" in old:
+                profile["calibration"] = old["calibration"]
+        except (OSError, ValueError):
+            pass
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
 
     print(f"Profile written -> {args.out}")
     print(f"  {profile['n_docs']} docs, {profile['total_words']} words")
+    if not profile["spellchecker"]:
+        print("  (pyspellchecker not installed: spelling-deviation feature disabled)")
     print(f"  signature phrases: {', '.join(repr(s) for s in sig) or '(none found)'}\n")
     headline = [
         "mean_sentence_len", "std_sentence_len", "pct_para_initial_connective",
@@ -149,7 +167,7 @@ def main() -> None:
         "hedge_rate", "intensifier_rate", "comma_per_sentence",
         "comma_splice_proxy", "signature_ngram_rate", "exclamation_rate",
         "lowercase_i_rate", "cap_anomaly_rate", "spelling_deviation_rate",
-        "contraction_rate",
+        "contraction_rate", "ai_tell_rate", "em_dash_rate",
     ]
     for k in headline:
         s = profile["features"][k]

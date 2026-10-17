@@ -47,6 +47,57 @@ INTENSIFIERS = [
     "completely", "way", "so", "too", "quite", "a lot", "tons of", "super",
 ]
 
+# ordinary words that should never be Capitalised mid-sentence (stray-capital
+# quirk detector); proper nouns are deliberately absent
+COMMON_WORDS = frozenset(
+    FUNCTION_WORDS
+    + [w for m in DISCOURSE_MARKERS + HEDGES + INTENSIFIERS for w in m.split()]
+    + """
+    about after again against all almost always another any because been before
+    being between both could did does doing down during each even every few
+    first good great had has have having her here him his how its just last
+    least less like little long made make many more most much must my never
+    new next no nor now often old only other our out over own people same
+    should since some something still such than their them there these they
+    thing things think those though through time today under until up us
+    use used using want was way we well what where which while who why with
+    without work world would year years you your important different
+    possible problem problems idea ideas example place ways life day days
+    """.split()
+)
+
+# Words and phrases strongly over-represented in LLM output: the focal words of
+# Juzek & Ward 2024 (arXiv 2412.11385) and the excess-vocabulary words of Kobak
+# et al. 2024/25 (arXiv 2406.07016), plus common assistant clichés. Scored only
+# ABOVE the writer's own baseline. The list drifts as models change — dated
+# 2026-10, refresh it periodically.
+AI_TELL_PATTERNS = [
+    r"delv(?:e|es|ed|ing)", r"showcas(?:e|es|ed|ing)", r"underscor(?:e|es|ed|ing)",
+    r"intricate(?:ly)?", r"intricac(?:y|ies)", r"pivotal", r"meticulous(?:ly)?",
+    r"realms?", r"groundbreaking", r"garner(?:s|ed|ing)?", r"surpass(?:es|ed|ing)?",
+    r"tapestry", r"testament", r"boasts", r"commendable", r"multifaceted",
+    r"seamless(?:ly)?", r"leverag(?:e|es|ed|ing)", r"foster(?:s|ed|ing)?",
+    r"plethora", r"furthermore", r"moreover", r"ever-evolving", r"unwavering",
+    r"paramount", r"in today's (?:fast-paced|digital|modern) world",
+    r"it(?:'s| is) (?:worth|important to) not(?:e|ing)",
+    r"plays? an? (?:crucial|pivotal|vital|key) role", r"(?:stands|serves) as an?",
+    r"navigat(?:e|es|ing) the (?:complex|ever)", r"a rich (?:tapestry|history)",
+]
+_AI_TELL_RE = re.compile(r"\b(?:" + "|".join(AI_TELL_PATTERNS) + r")\b")
+
+# negative parallelism ("not only X but Y", "it's not X, it's Y") — LLMs
+# overshoot human rates for this figure
+_NEG_PARALLEL_RE = re.compile(
+    r"\bnot (?:only|just|merely)\b[^.!?]{0,80}?\bbut\b"
+    r"|\bit(?:'s| is) not (?:just |only |merely |about )?[^.!?,]{1,40}, it(?:'s| is)\b"
+    r"|\bisn't (?:just|only|merely)\b"
+)
+# em dashes, plus spaced en dashes / double hyphens used as dashes
+_DASH_RE = re.compile(r"—| – | -- ")
+# nominalisations — a cheap proxy for the noun-heavy register instruction-tuned
+# models favour (Reinhart et al., PNAS 2025; Herbold et al. 2023)
+_NOMINAL_RE = re.compile(r"\b[a-z]{3,}(?:tion|sion|ment|ness|ity|ance|ence|ancy|ency)s?\b")
+
 # ---------------------------------------------------------------------------
 # tokenisation
 # ---------------------------------------------------------------------------
@@ -119,19 +170,52 @@ def _spelling_deviation_rate(raw_words: list[str], n_words: int) -> float:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=None)
+def _phrase_re(phrase: str) -> re.Pattern:
+    # whole words only: "so" must not match "some", "a lot" not "a lottery"
+    return re.compile(rf"\b{re.escape(phrase)}\b")
+
+
 def _count_phrases(text_lower: str, phrases) -> int:
-    total = 0
-    for p in phrases:
-        if " " in p:
-            total += text_lower.count(p)
-        else:
-            total += len(re.findall(rf"\b{re.escape(p)}\b", text_lower))
-    return total
+    return sum(len(_phrase_re(p).findall(text_lower)) for p in phrases)
 
 
 def _starts_with_marker(sentence: str, markers) -> bool:
     s = sentence.lower().lstrip("\"'(- ")
-    return any(s.startswith(m) for m in markers)
+    return any(_phrase_re(m).match(s) for m in markers)
+
+
+def spellchecker_available() -> bool:
+    return _spell() is not None
+
+
+def _cap_anomalies(sentences: list[str], lower_vocab: set[str]) -> list[str]:
+    """Mid-sentence Capitalised words that are ordinary words, not names.
+
+    A word counts when its lowercase form is a common English word or appears
+    lowercase elsewhere in the same text ("On the other hand, Such lessons").
+    Proper nouns ("Tom", "Monday") don't, and neither does a capital right
+    after a colon or an opening quote.
+    """
+    hits = []
+    for s in sentences:
+        toks = s.split()
+        if sum(t[:1].isupper() for t in toks) > len(toks) / 2:
+            continue  # a Title Case heading, not a stray capital
+        for prev, w in zip(toks, toks[1:]):  # skip the legit sentence-initial word
+            if prev.endswith((":", '"', "“")) or w.startswith(('"', "“")):
+                continue
+            core = w.strip(".,;:!?\"'()[]“”")
+            if re.fullmatch(r"[A-Z][a-z]+", core) and (
+                core.lower() in COMMON_WORDS or core.lower() in lower_vocab
+            ):
+                hits.append(core)
+    return hits
+
+
+def ai_tell_hits(text: str) -> list[str]:
+    """The AI-tell words/phrases found in text (lowercased, in order)."""
+    return [m.group(0) for m in _AI_TELL_RE.finditer(_normalize(text).lower())]
 
 
 def _mattr(tokens: list[str], window: int = 50) -> float:
@@ -225,19 +309,22 @@ def features(text: str, signature_ngrams=None) -> dict[str, float]:
     feats["contraction_rate"] = 1000.0 * contractions / n_words
 
     # --- quirk markers ---------------------------------------------------
-    # lowercase standalone "i" pronoun
+    # lowercase standalone "i" pronoun (not the "i" of "i.e.")
     feats["lowercase_i_rate"] = 1000.0 * len(
-        re.findall(r"(?<![A-Za-z])i(?![A-Za-z'])", text)
+        re.findall(r"(?<![A-Za-z.])i(?![A-Za-z']|\.e\.)", text)
     ) / n_words
-    # mid-sentence Capitalised words (rough proxy for stray capitalisation)
-    cap_anomaly = 0
-    for s in sentences:
-        toks = s.split()
-        for w in toks[1:]:  # skip the legit sentence-initial word
-            if re.match(r"[A-Z][a-z]+$", w) and w not in ("I",):
-                cap_anomaly += 1
-    feats["cap_anomaly_rate"] = 1000.0 * cap_anomaly / n_words
+    # ordinary words Capitalised mid-sentence (stray capitalisation)
+    lower_vocab = {w for w in raw_words if w.islower()}
+    feats["cap_anomaly_rate"] = (
+        1000.0 * len(_cap_anomalies(sentences, lower_vocab)) / n_words
+    )
     feats["spelling_deviation_rate"] = _spelling_deviation_rate(raw_words, n_words)
+
+    # --- AI tells (penalised only above the writer's own rate) ------------
+    feats["ai_tell_rate"] = 1000.0 * len(_AI_TELL_RE.findall(low)) / n_words
+    feats["em_dash_rate"] = 1000.0 * len(_DASH_RE.findall(text)) / n_words
+    feats["neg_parallelism_rate"] = 1000.0 * len(_NEG_PARALLEL_RE.findall(low)) / n_words
+    feats["nominalization_rate"] = 1000.0 * len(_NOMINAL_RE.findall(low)) / n_words
 
     # --- function-word vector -------------------------------------------
     from collections import Counter

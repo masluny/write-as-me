@@ -11,7 +11,6 @@ Put your samples in ./samples (see samples/README.md) and run:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import json
 import re
 import sys
@@ -111,7 +110,10 @@ def ingest(corpus_dir: Path) -> list[dict]:
                 file=sys.stderr,
             )
             continue
-        year = dt.datetime.fromtimestamp(path.stat().st_mtime).year
+        # a file's mtime says when it was copied, not written — only trust a
+        # year in the filename (e.g. uni_essay_2024.pdf)
+        m = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", path.stem)
+        year = int(m.group(0)) if m else None
         docs.append(
             {
                 "path": str(path),
@@ -152,7 +154,7 @@ def main() -> None:
     total = sum(d["n_words"] for d in docs)
     print(f"Ingested {len(docs)} documents ({total} words) -> {args.out}")
     for d in docs:
-        print(f"  {d['name']:<36} {d['genre']:<8} {d['year']}  {d['n_words']:>5}w")
+        print(f"  {d['name']:<36} {d['genre']:<8} {d['year'] or '-':<4}  {d['n_words']:>5}w")
     if len(docs) < 6:
         print("\n  Tip: 8+ samples across a few genres gives a much sharper fingerprint.")
 
